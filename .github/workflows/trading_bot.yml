@@ -1,0 +1,37 @@
+name: Forward Test Bot
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install websockets pandas numpy
+
+      - name: Run one trading pass
+        env:
+          DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
+        run: python3 single_run_bot.py
+
+      - name: Save results back to the repository
+        run: |
+          git config --global user.name "trading-bot"
+          git config --global user.email "bot@users.noreply.github.com"
+          git add trades.db trade_log.csv candle_cache/ || true
+          git diff --cached --quiet || git commit -m "Bot run: $(date -u)"
+          git push
