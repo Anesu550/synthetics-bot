@@ -28,7 +28,7 @@ import pandas as pd
 
 import final_locked_strategy_v3 as strat
 
-APP_ID = 1089
+APP_ID = os.environ.get("DERIV_APP_ID", "1089")  # use your OWN registered App ID for trading actions
 API_TOKEN = os.environ.get("DERIV_API_TOKEN")
 WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
