@@ -356,6 +356,9 @@ async def run_monitor_pass(ws):
 async def main():
     if not API_TOKEN:
         raise RuntimeError("Set DERIV_API_TOKEN environment variable first (demo account token).")
+    print(f"[diagnostic] Token received, length={len(API_TOKEN)} chars "
+          f"(never printing the value itself). If this says length=0 or a "
+          f"suspiciously short number, the secret isn't reaching the script correctly.")
     db_init()
 
     async with websockets.connect(WS_URL) as ws:
