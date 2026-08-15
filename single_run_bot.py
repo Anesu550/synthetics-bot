@@ -28,8 +28,7 @@ import pandas as pd
 
 import final_locked_strategy_v3 as strat
 
-# --- CRITICAL FIX: use app_id=1 (default test app) to match the token ---
-APP_ID = 1
+APP_ID = os.environ.get("DERIV_APP_ID", "1089")
 API_TOKEN = os.environ.get("DERIV_API_TOKEN")
 WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
@@ -45,7 +44,19 @@ BREAKEVEN_TRIGGER_R = 3.0
 DB_PATH = "trades.db"
 CSV_PATH = "trade_log.csv"
 CACHE_DIR = "candle_cache"
-STALE_SIGNAL_SEC = 20 * 60  # a schedule run is ~15min apart; allow some slack
+STALE_SIGNAL_SEC = 20 * 60
+
+# Per-symbol minimum stake -- VERIFY these against Deriv's platform for each
+# symbol you trade (Trade -> Multipliers -> pick symbol -> check minimum
+# stake shown). $1.00 is a common default but is NOT guaranteed correct for
+# every symbol -- this was a real gap (one global guessed number) that's
+# now fixed to be per-symbol and explicit.
+MIN_STAKE_MAP = {
+    "R_75":     1.0,
+    "R_100":    1.0,
+    "BOOM500":  1.0,
+    "CRASH500": 1.0,
+}  # a schedule run is ~15min apart; allow some slack
 
 FULL_HISTORY_TARGET = {
     3600: 8000, 300: 90000, 14400: 2200, 900: 35000,
@@ -55,7 +66,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
-# Database layer
+# Database layer (identical to live_bot.py, unchanged)
 # ---------------------------------------------------------------------------
 
 def db_init():
@@ -152,7 +163,7 @@ def sync_csv():
 
 
 # ---------------------------------------------------------------------------
-# Candle caching
+# Full-history candle caching (identical approach to live_bot.py)
 # ---------------------------------------------------------------------------
 
 def cache_path(symbol, granularity):
@@ -220,30 +231,52 @@ async def get_account_balance(ws):
 
 
 async def place_multiplier_trade(ws, symbol, direction, entry_price, stop_loss_price,
-                                  take_profit_price, stake, multiplier):
+                                  take_profit_price, intended_risk_amount, multiplier, min_stake):
     contract_type = "MULTUP" if direction == "bullish" else "MULTDOWN"
-    stop_loss_amount = stake * multiplier * abs(entry_price - stop_loss_price) / entry_price
+
+    price_move_pct = abs(entry_price - stop_loss_price) / entry_price
+    if price_move_pct <= 0 or multiplier <= 0:
+        print(f"  !! Invalid price move or multiplier for {symbol}, skipping")
+        return None, None, None
+
+    stake = intended_risk_amount / (multiplier * price_move_pct)
+    stop_loss_amount = stake * multiplier * price_move_pct
     take_profit_amount = stake * multiplier * abs(take_profit_price - entry_price) / entry_price
+
+    if stake < min_stake:
+        print(f"  !! Required stake ({stake:.4f}) for {symbol} is below its minimum ({min_stake}) -- "
+              f"this trade's stop is too tight for the requested risk amount at this multiplier. Skipping.")
+        return None, None, None
+
     buy_req = {
-        "buy": 1, "price": stake,
+        "buy": 1,
+        "price": stake,
         "parameters": {
-            "amount": stake, "basis": "stake", "contract_type": contract_type,
-            "currency": "USD", "symbol": symbol, "multiplier": multiplier,
-            "limit_order": {"stop_loss": round(stop_loss_amount, 2), "take_profit": round(take_profit_amount, 2)}
+            "amount": stake,
+            "basis": "stake",
+            "contract_type": contract_type,
+            "currency": "USD",
+            "symbol": symbol,
+            "multiplier": multiplier,
+            "limit_order": {
+                "stop_loss": round(stop_loss_amount, 2),
+                "take_profit": round(take_profit_amount, 2),
+            }
         }
     }
     await ws.send(json.dumps(buy_req))
     resp = json.loads(await ws.recv())
     if "error" in resp:
         print(f"  !! Trade placement FAILED for {symbol}: {resp['error']['message']}")
-        return None, None
+        return None, None, None
     contract_id = resp["buy"]["contract_id"]
-    print(f"  >> Trade placed: {symbol} {contract_type} stake={stake:.2f} contract_id={contract_id}")
-    return contract_id, stop_loss_amount
+    print(f"  >> Trade placed: {symbol} {contract_type} stake={stake:.2f} "
+          f"(risking {stop_loss_amount:.2f}, intended {intended_risk_amount:.2f}) contract_id={contract_id}")
+    return contract_id, stop_loss_amount, stake
 
 
 # ---------------------------------------------------------------------------
-# Single-pass trading check
+# Single-pass trading check (was trading_loop's body, now runs ONCE)
 # ---------------------------------------------------------------------------
 
 async def run_trading_pass(ws):
@@ -280,16 +313,17 @@ async def run_trading_pass(ws):
                         print(f"  -- Skipping {symbol} signal: another position already open")
                         continue
 
-                    stake = balance * (RISK_PCT / 100.0)
-                    contract_id, sl_amount = await place_multiplier_trade(
+                    intended_risk = balance * (RISK_PCT / 100.0)
+                    min_stake = MIN_STAKE_MAP.get(symbol, 1.0)  # falls back to 1.0 only if symbol not listed
+                    contract_id, sl_amount, actual_stake = await place_multiplier_trade(
                         ws, symbol, sig["direction"], sig["entry_price"],
-                        sig["stop_loss"], sig["take_profit"], stake, multiplier
+                        sig["stop_loss"], sig["take_profit"], intended_risk, multiplier, min_stake
                     )
                     if contract_id:
                         db_insert_open_trade(
                             contract_id, sig["direction"], sig["entry_time"],
                             sig["entry_price"], sig["stop_loss"], sig["take_profit"],
-                            pair_name, symbol, sig.get("source", "OB"), stake, sl_amount
+                            pair_name, symbol, sig.get("source", "OB"), actual_stake, sl_amount
                         )
                         sync_csv()
                         balance = await get_account_balance(ws)
@@ -299,7 +333,8 @@ async def run_trading_pass(ws):
 
 
 # ---------------------------------------------------------------------------
-# Single-pass monitor check
+# Single-pass monitor check (was monitor_loop's subscribe model, now a
+# one-shot QUERY per open contract since we can't listen forever)
 # ---------------------------------------------------------------------------
 
 async def run_monitor_pass(ws):
@@ -356,7 +391,9 @@ async def run_monitor_pass(ws):
 async def main():
     if not API_TOKEN:
         raise RuntimeError("Set DERIV_API_TOKEN environment variable first (demo account token).")
-    print(f"[diagnostic] Token received, length={len(API_TOKEN)} chars")
+    print(f"[diagnostic] Token received, length={len(API_TOKEN)} chars "
+          f"(never printing the value itself). If this says length=0 or a "
+          f"suspiciously short number, the secret isn't reaching the script correctly.")
     db_init()
 
     async with websockets.connect(WS_URL) as ws:
