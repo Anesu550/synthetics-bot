@@ -21,9 +21,16 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install websockets pandas numpy
+        run: pip install websockets pandas numpy requests
 
-      - name: Debug - test authorization against both app_ids
+      - name: Debug - test NEW OTP-based flow
+        env:
+          DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
+          DERIV_APP_ID: ${{ secrets.DERIV_APP_ID }}
+        run: python3 otp_test.py
+        continue-on-error: true
+
+      - name: Debug - test authorization against both app_ids (legacy flow)
         env:
           DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
         run: python3 debug_auth.py
