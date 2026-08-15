@@ -23,6 +23,12 @@ jobs:
       - name: Install dependencies
         run: pip install websockets pandas numpy
 
+      - name: Debug - test authorization against both app_ids
+        env:
+          DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
+        run: python3 debug_auth.py
+        continue-on-error: true
+
       - name: Run one trading pass
         env:
           DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
