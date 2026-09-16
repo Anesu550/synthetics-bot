@@ -24,13 +24,14 @@ import time
 from datetime import datetime, timezone
 
 import websockets
+import requests
 import pandas as pd
 
 import final_locked_strategy_v3 as strat
 
-APP_ID = os.environ.get("DERIV_APP_ID", "1089")
+APP_ID = os.environ.get("DERIV_APP_ID")  # must be a REGISTERED app ID (from "Create new app"), not a plain number
 API_TOKEN = os.environ.get("DERIV_API_TOKEN")
-WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
+REST_BASE = "https://api.derivws.com"
 
 MULTIPLIER_MAP = {
     "R_75":     100,
@@ -388,6 +389,35 @@ async def run_monitor_pass(ws):
 
 # ---------------------------------------------------------------------------
 
+async def get_demo_ws_url():
+    """Implements the CONFIRMED working flow from tonight's diagnostic:
+    GET accounts -> find the demo one -> POST for an OTP -> return the
+    ready-to-use WebSocket URL. This replaces the old (broken/deprecated)
+    direct-connect-and-authorize approach entirely."""
+    if not APP_ID:
+        raise RuntimeError("Set DERIV_APP_ID environment variable (a REGISTERED app ID from "
+                            "developers.deriv.com's 'Create new app' page, not a plain number like 1089).")
+    headers = {"Authorization": f"Bearer {API_TOKEN}", "Deriv-App-ID": APP_ID}
+
+    resp = requests.get(f"{REST_BASE}/trading/v1/options/accounts", headers=headers)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to list accounts: {resp.status_code} {resp.text}")
+    accounts = resp.json().get("data", [])
+    demo_accounts = [a for a in accounts if a.get("account_type") == "demo"]
+    if not demo_accounts:
+        raise RuntimeError("!! No demo account found on this token. Refusing to trade live money.")
+    account_id = demo_accounts[0]["account_id"]
+    print(f"Using demo account: {account_id} (balance: {demo_accounts[0].get('balance')})")
+
+    resp2 = requests.post(f"{REST_BASE}/trading/v1/options/accounts/{account_id}/otp", headers=headers)
+    if resp2.status_code != 200:
+        raise RuntimeError(f"Failed to get OTP: {resp2.status_code} {resp2.text}")
+    ws_url = resp2.json().get("data", {}).get("url")
+    if not ws_url:
+        raise RuntimeError(f"No WebSocket URL in OTP response: {resp2.text}")
+    return ws_url
+
+
 async def main():
     if not API_TOKEN:
         raise RuntimeError("Set DERIV_API_TOKEN environment variable first (demo account token).")
@@ -396,14 +426,12 @@ async def main():
           f"suspiciously short number, the secret isn't reaching the script correctly.")
     db_init()
 
-    async with websockets.connect(WS_URL) as ws:
-        await ws.send(json.dumps({"authorize": API_TOKEN}))
-        resp = json.loads(await ws.recv())
-        if "error" in resp:
-            raise RuntimeError(f"Authorization failed: {resp['error']['message']}")
-        if not resp["authorize"].get("is_virtual"):
-            raise RuntimeError("!! Token is NOT a demo/virtual account. Refusing to trade live money.")
-        print(f"Authorized: {resp['authorize']['loginid']} (demo)")
+    ws_url = await get_demo_ws_url()  # CONFIRMED working: REST accounts -> OTP -> ready WS URL
+
+    async with websockets.connect(ws_url) as ws:
+        # No separate authorize message needed -- the OTP in the URL already
+        # authenticated this connection (confirmed by tonight's diagnostic).
+        print("Connected via OTP-authenticated WebSocket (demo account).")
 
         await run_monitor_pass(ws)   # check existing open trades FIRST
         await run_trading_pass(ws)   # then look for new setups
