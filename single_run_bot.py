@@ -306,7 +306,7 @@ async def run_trading_pass(ws):
                 for _, sig in new_signals.iterrows():
                     db_set_cursor(symbol, pair_name, sig["entry_time"])
 
-                    age_sec = (pd.Timestamp.utcnow() - sig["entry_time"]).total_seconds()
+                    age_sec = (pd.Timestamp.now('UTC').tz_localize(None) - sig["entry_time"]).total_seconds()
                     if age_sec > STALE_SIGNAL_SEC:
                         continue
 
