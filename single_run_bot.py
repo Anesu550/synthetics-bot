@@ -34,11 +34,72 @@ API_TOKEN = os.environ.get("DERIV_API_TOKEN")
 REST_BASE = "https://api.derivws.com"
 
 MULTIPLIER_MAP = {
-    "R_75":     100,
-    "R_100":    100,
-    "BOOM500":  100,
-    "CRASH500": 100,
+    # --- Volatility Indices (confirmed codes, used in tonight's backtests) ---
+    "R_10":      100,
+    "R_25":      100,
+    "R_50":      100,
+    "R_75":      100,
+    "R_100":     100,
+    "1HZ10V":    100,
+    "1HZ25V":    100,
+    "1HZ50V":    100,
+    "1HZ75V":    100,
+    "1HZ100V":   100,
+    "1HZ15V":    100,   # unverified code -- confirm on Deriv's platform (this is a guess based on naming pattern)
+    "1HZ30V":    100,   # unverified code -- confirm
+    "1HZ150V":   100,   # unverified code -- confirm
+    "1HZ250V":   100,   # unverified code -- confirm
+
+    # --- Boom / Crash (confirmed codes) ---
+    "BOOM300N":  100,
+    "BOOM500":   100,
+    "BOOM600":   100,
+    "BOOM900":   100,
+    "BOOM1000":  100,
+    "CRASH300N": 100,
+    "CRASH500":  100,
+    "CRASH600":  100,
+    "CRASH900":  100,
+    "CRASH1000": 100,
+
+    # --- Jump Indices (confirmed codes) ---
+    "JD10":      100,
+    "JD25":      100,
+    "JD50":      100,
+    "JD75":      100,
+    "JD100":     100,
+
+    # --- Step Index (confirmed code) ---
+    "stpRNG":    100,
+
+    # --- Dex / DSI / VolBoom / VolCrash: UNVERIFIED --
+    # You fetched these files independently -- I never recorded the exact
+    # symbol codes you used. Placeholder guesses below; VERIFY every one of
+    # these against Deriv's platform (or your own fetch history) before
+    # trusting them -- a wrong code will just fail cleanly per-symbol
+    # (logged as an error, not silently wrong), but won't trade correctly
+    # until fixed.
+    "DEX600DN":  100,
+    "DEX600UP":  100,
+    "DEX900DN":  100,
+    "DEX900UP":  100,
+    "DEX1500DN": 100,
+    "DEX1500UP": 100,
+    "DSI10":     100,
+    "DSI20":     100,
+    "DSI30":     100,
+    "VOLBOOM400": 100,
+    "VOLBOOM550": 100,
+    "VOLBOOM750": 100,
+    "VOLCRASH400": 100,
+    "VOLCRASH550": 100,
+    "VOLCRASH750": 100,
 }
+
+# Per-symbol minimum stake -- VERIFY every value against Deriv's platform
+# (Trade -> Multipliers -> pick symbol -> check minimum stake shown).
+# $1.00 is a placeholder default, NOT a confirmed real minimum for any symbol.
+MIN_STAKE_MAP = {symbol: 1.0 for symbol in MULTIPLIER_MAP}
 
 RISK_PCT = 1.0
 BREAKEVEN_TRIGGER_R = 3.0
@@ -46,18 +107,6 @@ DB_PATH = "trades.db"
 CSV_PATH = "trade_log.csv"
 CACHE_DIR = "candle_cache"
 STALE_SIGNAL_SEC = 20 * 60
-
-# Per-symbol minimum stake -- VERIFY these against Deriv's platform for each
-# symbol you trade (Trade -> Multipliers -> pick symbol -> check minimum
-# stake shown). $1.00 is a common default but is NOT guaranteed correct for
-# every symbol -- this was a real gap (one global guessed number) that's
-# now fixed to be per-symbol and explicit.
-MIN_STAKE_MAP = {
-    "R_75":     1.0,
-    "R_100":    1.0,
-    "BOOM500":  1.0,
-    "CRASH500": 1.0,
-}  # a schedule run is ~15min apart; allow some slack
 
 FULL_HISTORY_TARGET = {
     3600: 8000, 300: 90000, 14400: 2200, 900: 35000,
