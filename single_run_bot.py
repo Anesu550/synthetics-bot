@@ -329,54 +329,55 @@ async def place_multiplier_trade(ws, symbol, direction, entry_price, stop_loss_p
 # Single-pass trading check (was trading_loop's body, now runs ONCE)
 # ---------------------------------------------------------------------------
 
-async def run_trading_pass(ws):
-    balance = await get_account_balance(ws)
-    print(f"[trading pass {datetime.now(timezone.utc)}] Balance: {balance:.2f}")
-
+async def run_trading_pass():
     for symbol, multiplier in MULTIPLIER_MAP.items():
         try:
-            htf1 = await update_history(ws, symbol, 3600)
-            ltf1 = await update_history(ws, symbol, 300)
-            htf2 = await update_history(ws, symbol, 14400)
-            ltf2 = await update_history(ws, symbol, 900)
+            async with await fresh_ws() as ws:  # fresh connection per symbol -- avoids OTP expiry mid-run
+                balance = await get_account_balance(ws)
+                print(f"[trading pass {datetime.now(timezone.utc)}] {symbol}  Balance: {balance:.2f}")
 
-            for htf_df, ltf_df, pair_name in [(htf1, ltf1, "H1_M5"), (htf2, ltf2, "H4_M15")]:
-                htf_df.to_csv("_tmp_htf.csv", index=False)
-                ltf_df.to_csv("_tmp_ltf.csv", index=False)
+                htf1 = await update_history(ws, symbol, 3600)
+                ltf1 = await update_history(ws, symbol, 300)
+                htf2 = await update_history(ws, symbol, 14400)
+                ltf2 = await update_history(ws, symbol, 900)
 
-                log = strat.run_combined_backtest("_tmp_htf.csv", "_tmp_ltf.csv")
-                if log.empty:
-                    continue
+                for htf_df, ltf_df, pair_name in [(htf1, ltf1, "H1_M5"), (htf2, ltf2, "H4_M15")]:
+                    htf_df.to_csv("_tmp_htf.csv", index=False)
+                    ltf_df.to_csv("_tmp_ltf.csv", index=False)
 
-                log["entry_time"] = pd.to_datetime(log["entry_time"])
-                cursor = db_get_cursor(symbol, pair_name)
-                new_signals = log[log["entry_time"] > cursor].sort_values("entry_time")
-
-                for _, sig in new_signals.iterrows():
-                    db_set_cursor(symbol, pair_name, sig["entry_time"])
-
-                    age_sec = (pd.Timestamp.now('UTC').tz_localize(None) - sig["entry_time"]).total_seconds()
-                    if age_sec > STALE_SIGNAL_SEC:
+                    log = strat.run_combined_backtest("_tmp_htf.csv", "_tmp_ltf.csv")
+                    if log.empty:
                         continue
 
-                    if db_has_open_trade_for_symbol(symbol):
-                        print(f"  -- Skipping {symbol} signal: another position already open")
-                        continue
+                    log["entry_time"] = pd.to_datetime(log["entry_time"])
+                    cursor = db_get_cursor(symbol, pair_name)
+                    new_signals = log[log["entry_time"] > cursor].sort_values("entry_time")
 
-                    intended_risk = balance * (RISK_PCT / 100.0)
-                    min_stake = MIN_STAKE_MAP.get(symbol, 1.0)  # falls back to 1.0 only if symbol not listed
-                    contract_id, sl_amount, actual_stake = await place_multiplier_trade(
-                        ws, symbol, sig["direction"], sig["entry_price"],
-                        sig["stop_loss"], sig["take_profit"], intended_risk, multiplier, min_stake
-                    )
-                    if contract_id:
-                        db_insert_open_trade(
-                            contract_id, sig["direction"], sig["entry_time"],
-                            sig["entry_price"], sig["stop_loss"], sig["take_profit"],
-                            pair_name, symbol, sig.get("source", "OB"), actual_stake, sl_amount
+                    for _, sig in new_signals.iterrows():
+                        db_set_cursor(symbol, pair_name, sig["entry_time"])
+
+                        age_sec = (pd.Timestamp.now('UTC').tz_localize(None) - sig["entry_time"]).total_seconds()
+                        if age_sec > STALE_SIGNAL_SEC:
+                            continue
+
+                        if db_has_open_trade_for_symbol(symbol):
+                            print(f"  -- Skipping {symbol} signal: another position already open")
+                            continue
+
+                        intended_risk = balance * (RISK_PCT / 100.0)
+                        min_stake = MIN_STAKE_MAP.get(symbol, 1.0)
+                        contract_id, sl_amount, actual_stake = await place_multiplier_trade(
+                            ws, symbol, sig["direction"], sig["entry_price"],
+                            sig["stop_loss"], sig["take_profit"], intended_risk, multiplier, min_stake
                         )
-                        sync_csv()
-                        balance = await get_account_balance(ws)
+                        if contract_id:
+                            db_insert_open_trade(
+                                contract_id, sig["direction"], sig["entry_time"],
+                                sig["entry_price"], sig["stop_loss"], sig["take_profit"],
+                                pair_name, symbol, sig.get("source", "OB"), actual_stake, sl_amount
+                            )
+                            sync_csv()
+                            balance = await get_account_balance(ws)
 
         except Exception as e:
             print(f"  !! Error processing {symbol}: {e}")
@@ -387,50 +388,51 @@ async def run_trading_pass(ws):
 # one-shot QUERY per open contract since we can't listen forever)
 # ---------------------------------------------------------------------------
 
-async def run_monitor_pass(ws):
+async def run_monitor_pass():
     open_trades = db_get_open_trades()
     print(f"[monitor pass] Checking {len(open_trades)} open trade(s)...")
 
     for t in open_trades:
         try:
-            await ws.send(json.dumps({
-                "proposal_open_contract": 1, "contract_id": int(t["contract_id"]), "subscribe": 0
-            }))
-            resp = json.loads(await ws.recv())
-            if "error" in resp:
-                print(f"  !! Error checking contract {t['contract_id']}: {resp['error']['message']}")
-                continue
+            async with await fresh_ws() as ws:  # fresh connection per trade -- same OTP-expiry fix
+                await ws.send(json.dumps({
+                    "proposal_open_contract": 1, "contract_id": int(t["contract_id"]), "subscribe": 0
+                }))
+                resp = json.loads(await ws.recv())
+                if "error" in resp:
+                    print(f"  !! Error checking contract {t['contract_id']}: {resp['error']['message']}")
+                    continue
 
-            poc = resp.get("proposal_open_contract")
-            if not poc:
-                continue
-            profit = float(poc.get("profit", 0.0))
+                poc = resp.get("proposal_open_contract")
+                if not poc:
+                    continue
+                profit = float(poc.get("profit", 0.0))
 
-            if poc.get("is_sold"):
-                sell_price = float(poc.get("sell_price", 0.0))
-                exit_time = datetime.fromtimestamp(poc.get("sell_time", time.time()), tz=timezone.utc)
-                sl_amount = t["stop_loss_amount"]
-                r_multiple = profit / sl_amount if sl_amount and sl_amount > 0 else None
-                result = "win" if profit > 0.01 else ("loss" if profit < -0.01 else "breakeven")
-                db_close_trade(t["contract_id"], exit_time, sell_price, result, r_multiple)
-                sync_csv()
-                print(f"  Closed {t['contract_id']}: {result}  profit={profit:.2f}  R={r_multiple}")
-                continue
+                if poc.get("is_sold"):
+                    sell_price = float(poc.get("sell_price", 0.0))
+                    exit_time = datetime.fromtimestamp(poc.get("sell_time", time.time()), tz=timezone.utc)
+                    sl_amount = t["stop_loss_amount"]
+                    r_multiple = profit / sl_amount if sl_amount and sl_amount > 0 else None
+                    result = "win" if profit > 0.01 else ("loss" if profit < -0.01 else "breakeven")
+                    db_close_trade(t["contract_id"], exit_time, sell_price, result, r_multiple)
+                    sync_csv()
+                    print(f"  Closed {t['contract_id']}: {result}  profit={profit:.2f}  R={r_multiple}")
+                    continue
 
-            # breakeven-to-3.0R check
-            if not t["breakeven_applied"]:
-                sl_amount = t["stop_loss_amount"]
-                if sl_amount and sl_amount > 0 and profit >= BREAKEVEN_TRIGGER_R * sl_amount:
-                    await ws.send(json.dumps({
-                        "contract_update": 1, "contract_id": int(t["contract_id"]),
-                        "limit_order": {"stop_loss": 0}
-                    }))
-                    update_resp = json.loads(await ws.recv())
-                    if "error" in update_resp:
-                        print(f"  !! Breakeven update FAILED for {t['contract_id']}: {update_resp['error']['message']}")
-                    else:
-                        db_mark_breakeven_applied(t["contract_id"])
-                        print(f"  >> Breakeven applied to {t['contract_id']}")
+                # breakeven-to-3.0R check
+                if not t["breakeven_applied"]:
+                    sl_amount = t["stop_loss_amount"]
+                    if sl_amount and sl_amount > 0 and profit >= BREAKEVEN_TRIGGER_R * sl_amount:
+                        await ws.send(json.dumps({
+                            "contract_update": 1, "contract_id": int(t["contract_id"]),
+                            "limit_order": {"stop_loss": 0}
+                        }))
+                        update_resp = json.loads(await ws.recv())
+                        if "error" in update_resp:
+                            print(f"  !! Breakeven update FAILED for {t['contract_id']}: {update_resp['error']['message']}")
+                        else:
+                            db_mark_breakeven_applied(t["contract_id"])
+                            print(f"  >> Breakeven applied to {t['contract_id']}")
 
         except Exception as e:
             print(f"  !! Error monitoring contract {t['contract_id']}: {e}")
@@ -467,6 +469,17 @@ async def get_demo_ws_url():
     return ws_url
 
 
+async def fresh_ws():
+    """Returns a NEWLY connected, freshly-authenticated websocket. Call this
+    right before each unit of work rather than reusing one connection for
+    a long time -- Deriv's OTP is short-lived (confirmed by tonight's run:
+    a connection held open past ~2 minutes gets forcibly closed mid-work,
+    causing 'no close frame received or sent' errors on every subsequent
+    call). Getting a fresh connection per symbol avoids this entirely."""
+    ws_url = await get_demo_ws_url()
+    return await websockets.connect(ws_url)
+
+
 async def main():
     if not API_TOKEN:
         raise RuntimeError("Set DERIV_API_TOKEN environment variable first (demo account token).")
@@ -475,15 +488,12 @@ async def main():
           f"suspiciously short number, the secret isn't reaching the script correctly.")
     db_init()
 
-    ws_url = await get_demo_ws_url()  # CONFIRMED working: REST accounts -> OTP -> ready WS URL
-
-    async with websockets.connect(ws_url) as ws:
-        # No separate authorize message needed -- the OTP in the URL already
-        # authenticated this connection (confirmed by tonight's diagnostic).
-        print("Connected via OTP-authenticated WebSocket (demo account).")
-
-        await run_monitor_pass(ws)   # check existing open trades FIRST
-        await run_trading_pass(ws)   # then look for new setups
+    # Each function now manages its own short-lived, freshly-authenticated
+    # connections internally (per symbol / per open trade), since Deriv's
+    # OTP expires quickly and a single long-held connection was confirmed
+    # tonight to fail partway through a 45-symbol run.
+    await run_monitor_pass()   # check existing open trades FIRST
+    await run_trading_pass()   # then look for new setups
 
     sync_csv()
     print("Single pass complete.")
