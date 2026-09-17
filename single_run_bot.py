@@ -224,7 +224,7 @@ async def fetch_candle_chunk(ws, symbol, granularity, count, end):
     req = {"ticks_history": symbol, "adjust_start_time": 1, "count": count,
            "end": end, "start": 1, "style": "candles", "granularity": granularity}
     await ws.send(json.dumps(req))
-    resp = json.loads(await ws.recv())
+    resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
     if "error" in resp:
         raise RuntimeError(f"Deriv error fetching {symbol}@{granularity}: {resp['error']['message']}")
     return resp["candles"]
@@ -274,7 +274,7 @@ async def update_history(ws, symbol, granularity):
 
 async def get_account_balance(ws):
     await ws.send(json.dumps({"balance": 1, "subscribe": 0}))
-    resp = json.loads(await ws.recv())
+    resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
     if "error" in resp:
         raise RuntimeError(f"Balance error: {resp['error']['message']}")
     return float(resp["balance"]["balance"])
@@ -315,7 +315,7 @@ async def place_multiplier_trade(ws, symbol, direction, entry_price, stop_loss_p
         }
     }
     await ws.send(json.dumps(buy_req))
-    resp = json.loads(await ws.recv())
+    resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
     if "error" in resp:
         print(f"  !! Trade placement FAILED for {symbol}: {resp['error']['message']}")
         return None, None, None
@@ -398,7 +398,7 @@ async def run_monitor_pass():
                 await ws.send(json.dumps({
                     "proposal_open_contract": 1, "contract_id": int(t["contract_id"]), "subscribe": 0
                 }))
-                resp = json.loads(await ws.recv())
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
                 if "error" in resp:
                     print(f"  !! Error checking contract {t['contract_id']}: {resp['error']['message']}")
                     continue
@@ -427,7 +427,7 @@ async def run_monitor_pass():
                             "contract_update": 1, "contract_id": int(t["contract_id"]),
                             "limit_order": {"stop_loss": 0}
                         }))
-                        update_resp = json.loads(await ws.recv())
+                        update_resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
                         if "error" in update_resp:
                             print(f"  !! Breakeven update FAILED for {t['contract_id']}: {update_resp['error']['message']}")
                         else:
