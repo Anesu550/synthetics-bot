@@ -1052,7 +1052,7 @@ def _find_sd_bear_candidates(htf, ltf, rr_min, branges):
 
 def run_combined_backtest(htf_path: str, ltf_path: str, daily_path: Optional[str] = None,
                            risk_pct: float = 1.0, rr_min: float = 2.0, account: float = 1000.0,
-                           directions: str = "both") -> pd.DataFrame:
+                           directions: str = "both", verbose: bool = True) -> pd.DataFrame:
     """LOCKED v5: Order Block POIs + Supply/Demand POIs, merged chronologically,
     one shared-equity backtest, single 'one position open at a time' rule
     enforced across BOTH sources combined. This is the validated 299-trade,
@@ -1111,12 +1111,13 @@ def run_combined_backtest(htf_path: str, ltf_path: str, daily_path: Optional[str
         "source": getattr(t, "source", "OB"),
     } for t in trades])
 
-    if len(trades):
-        wins = log[log["result"] == "win"]
-        print(f"\n[COMBINED OB+SD] Total trades: {len(trades)}  Win rate: {len(wins)/len(trades)*100:.1f}%  "
-              f"Total R: {log['r_multiple'].sum():.2f}  Ending equity: {equity:.2f}")
-    else:
-        print("No trades passed all filters in this dataset.")
+    if verbose:
+        if len(trades):
+            wins = log[log["result"] == "win"]
+            print(f"\n[COMBINED OB+SD] Total trades: {len(trades)}  Win rate: {len(wins)/len(trades)*100:.1f}%  "
+                  f"Total R: {log['r_multiple'].sum():.2f}  Ending equity: {equity:.2f}")
+        else:
+            print("No trades passed all filters in this dataset.")
 
     return log
 
