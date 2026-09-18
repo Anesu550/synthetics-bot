@@ -42,6 +42,57 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")           # a GitHub Personal Acce
 GITHUB_REPO = os.environ.get("GITHUB_REPO")              # e.g. "Anesu550/synthetics-bot"
 
 
+def ensure_git_repo():
+    """Turns Railway's container filesystem into a real git repo, so
+    push_results_to_github() has something to actually push from.
+
+    Railway's build (Nixpacks) copies your repo's files into the container
+    as a plain snapshot -- it does NOT preserve `.git` history. Confirmed
+    directly: `git rev-parse --is-inside-work-tree` failed on a real run.
+    So there is no git repo to push from at all until we create one here.
+
+    Approach: `git init` in place (the files are already correctly laid
+    out from the build), point `origin` at the authenticated GitHub URL,
+    and make one initial commit if needed so future pushes have a base to
+    diff against. This does NOT re-download anything -- it just turns the
+    existing files into a proper git working tree.
+    """
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False  # push_results_to_github() will print its own warning later
+
+    already_repo = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True)
+    if already_repo.returncode == 0:
+        print("  [git-init] Container already has a .git directory -- skipping init.")
+        return True
+
+    print("  [git-init] No .git directory found -- initializing one now...")
+    remote_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{GITHUB_REPO}.git"
+
+    try:
+        subprocess.run(["git", "init"], check=True, capture_output=True)
+        subprocess.run(["git", "config", "--global", "--add", "safe.directory", "*"], check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "railway-bot"], check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "bot@users.noreply.github.com"], check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", remote_url], check=True, capture_output=True)
+
+        # Fetch the real branch so we start from the actual repo history
+        # (not a disconnected fresh history), then reset our working files
+        # on top of it -- this keeps everything already on GitHub intact.
+        fetch = subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True)
+        if fetch.returncode == 0:
+            subprocess.run(["git", "branch", "-M", "main"], check=True, capture_output=True)
+            subprocess.run(["git", "reset", "origin/main"], check=True, capture_output=True)  # adopt remote history, keep local files as-is (working tree untouched)
+            print("  [git-init] Adopted existing GitHub history successfully.")
+        else:
+            print(f"  !! [git-init] fetch failed, starting fresh history instead: {fetch.stderr}")
+            subprocess.run(["git", "branch", "-M", "main"], check=True, capture_output=True)
+
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"  !! [git-init] FAILED: {e}")
+        return False
+
+
 def push_results_to_github():
     """Commits and pushes trades.db, trade_log.csv, and candle_cache/ back
     to the GitHub repo, the same way GitHub Actions' workflow file used to
@@ -59,16 +110,7 @@ def push_results_to_github():
               "on Railway to fix this.")
         return
 
-    remote_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{GITHUB_REPO}.git"
-
     try:
-        # Configure identity (harmless if already set; needed on a fresh container)
-        subprocess.run(["git", "config", "--global", "user.name", "railway-bot"], check=True, capture_output=True)
-        subprocess.run(["git", "config", "--global", "user.email", "bot@users.noreply.github.com"], check=True, capture_output=True)
-
-        # Point the remote at the authenticated URL (idempotent -- safe to re-run every cycle)
-        subprocess.run(["git", "remote", "set-url", "origin", remote_url], check=True, capture_output=True)
-
         subprocess.run(["git", "add", "trades.db", "trade_log.csv", "candle_cache/"], check=True, capture_output=True)
 
         # Nothing to commit is a normal, expected outcome most cycles (no new signals/trades)
@@ -102,17 +144,16 @@ async def run_forever():
           f"({CYCLE_SECONDS / 60:.1f} min). This process stays alive and loops "
           f"itself -- it does not depend on any external scheduler.")
 
-    # Verify this container actually has a git repo to push to -- fail loudly
-    # at startup rather than silently failing every push for the next 3 months.
-    git_dir_check = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True)
-    if git_dir_check.returncode != 0:
-        print("  !! WARNING: this container has no .git directory. Results CANNOT "
-              "be pushed to GitHub from here -- trade_log.csv will only exist "
-              "inside this Railway container and will be LOST on redeploy. "
-              "This needs fixing before trusting the forward test.")
-    elif not GITHUB_TOKEN or not GITHUB_REPO:
-        print("  !! WARNING: GITHUB_TOKEN / GITHUB_REPO not set -- see push_results_to_github() "
-              "docstring. Results will NOT be saved to your repo until these are set.")
+    # Turn this container into a real git repo (see ensure_git_repo docstring
+    # for why this is necessary on Railway specifically) before attempting
+    # any pushes.
+    git_ready = ensure_git_repo()
+    if not git_ready and (not GITHUB_TOKEN or not GITHUB_REPO):
+        print("  !! WARNING: GITHUB_TOKEN / GITHUB_REPO not set -- results will NOT "
+              "be saved to your repo until these are set on Railway.")
+    elif not git_ready:
+        print("  !! WARNING: git repo setup failed -- see [git-init] error above. "
+              "Results will NOT be saved to your repo until this is fixed.")
     else:
         print(f"  [git-push] Configured to push results to {GITHUB_REPO} after every cycle.")
 
