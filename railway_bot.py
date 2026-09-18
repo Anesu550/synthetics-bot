@@ -189,4 +189,21 @@ async def run_forever():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_forever())
+    while True:
+        try:
+            asyncio.run(run_forever())
+        except BaseException as e:
+            # Last-resort guard: run_forever() already has its own per-cycle
+            # try/except, and run_trading_pass/run_monitor_pass now catch
+            # BaseException per-symbol too. This outermost layer exists
+            # purely so that if something STILL escapes all of that (a
+            # genuinely unexpected crash), the process restarts itself
+            # in-place after a short pause instead of relying on Railway's
+            # container restart (which loses in-memory state and re-triggers
+            # the whole slow first-history-build sequence every time).
+            import traceback
+            print(f"\n!!!! FATAL: run_forever() crashed entirely: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            print("!!!! Restarting in 10 seconds...\n")
+            import time
+            time.sleep(10)
