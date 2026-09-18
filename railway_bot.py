@@ -104,29 +104,49 @@ def push_results_to_github():
     locally inside the running container even if this step is misconfigured,
     so a missing credential shouldn't take down the trading logic itself.
     """
+    print("  ########## GIT-PUSH ATTEMPT STARTING ##########")
+
     if not GITHUB_TOKEN or not GITHUB_REPO:
         print("  [git-push] SKIPPED -- GITHUB_TOKEN and/or GITHUB_REPO not set. "
               "Results are NOT being saved back to your repo. Set both env vars "
               "on Railway to fix this.")
+        print("  ########## GIT-PUSH ATTEMPT FINISHED (skipped) ##########")
         return
 
     try:
-        subprocess.run(["git", "add", "trades.db", "trade_log.csv", "candle_cache/"], check=True, capture_output=True)
+        add_result = subprocess.run(["git", "add", "trades.db", "trade_log.csv", "candle_cache/"],
+                                     capture_output=True, text=True)
+        print(f"  [git-push] git add returncode={add_result.returncode} "
+              f"stdout={add_result.stdout!r} stderr={add_result.stderr!r}")
+        add_result.check_returncode()  # raise now if it actually failed, AFTER we've already printed the details
 
         # Nothing to commit is a normal, expected outcome most cycles (no new signals/trades)
         diff = subprocess.run(["git", "diff", "--cached", "--quiet"], capture_output=True)
         if diff.returncode == 0:
             print("  [git-push] Nothing changed since last push -- skipping commit.")
+            print("  ########## GIT-PUSH ATTEMPT FINISHED (nothing to push) ##########")
             return
 
         commit_msg = f"Bot run: {datetime.now(timezone.utc).isoformat()}"
-        subprocess.run(["git", "commit", "-m", commit_msg], check=True, capture_output=True)
-        push = subprocess.run(["git", "push", "origin", "HEAD:main"], check=True, capture_output=True, text=True)
-        print(f"  [git-push] Pushed results to {GITHUB_REPO} successfully.")
+        commit_result = subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True, text=True)
+        print(f"  [git-push] git commit returncode={commit_result.returncode} "
+              f"stdout={commit_result.stdout!r} stderr={commit_result.stderr!r}")
+        commit_result.check_returncode()
+
+        push_result = subprocess.run(["git", "push", "origin", "HEAD:main"], capture_output=True, text=True)
+        print(f"  [git-push] git push returncode={push_result.returncode} "
+              f"stdout={push_result.stdout!r} stderr={push_result.stderr!r}")
+        push_result.check_returncode()
+
+        print(f"  [git-push] SUCCESS -- pushed results to {GITHUB_REPO}.")
+        print("  ########## GIT-PUSH ATTEMPT FINISHED (success) ##########")
     except subprocess.CalledProcessError as e:
-        print(f"  !! [git-push] FAILED: {e}")
-        print(f"     stdout: {e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout}")
-        print(f"     stderr: {e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr}")
+        print(f"  !! [git-push] FAILED at a specific step -- see the returncode/stdout/stderr "
+              f"printed just above this line for exactly which command failed and why.")
+        print("  ########## GIT-PUSH ATTEMPT FINISHED (FAILED) ##########")
+    except Exception as e:
+        print(f"  !! [git-push] UNEXPECTED ERROR (not a git command failure): {type(e).__name__}: {e}")
+        print("  ########## GIT-PUSH ATTEMPT FINISHED (FAILED) ##########")
 
 
 async def run_forever():
