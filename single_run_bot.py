@@ -345,9 +345,12 @@ async def run_trading_pass():
                     htf_df.to_csv("_tmp_htf.csv", index=False)
                     ltf_df.to_csv("_tmp_ltf.csv", index=False)
 
-                    log = strat.run_combined_backtest("_tmp_htf.csv", "_tmp_ltf.csv")
+                    log = strat.run_combined_backtest("_tmp_htf.csv", "_tmp_ltf.csv", verbose=False)
                     if log.empty:
+                        print(f"  [{symbol} {pair_name}] 0 signals exist across full cached history.")
                         continue
+                    print(f"  [{symbol} {pair_name}] {len(log)} signal(s) exist across full cached "
+                          f"history (historical, informational only) -- checking for anything new...")
 
                     log["entry_time"] = pd.to_datetime(log["entry_time"])
                     cursor = db_get_cursor(symbol, pair_name)
@@ -379,8 +382,16 @@ async def run_trading_pass():
                             sync_csv()
                             balance = await get_account_balance(ws)
 
-        except Exception as e:
-            print(f"  !! Error processing {symbol}: {e}")
+        except BaseException as e:
+            # Catching BaseException (not just Exception) here deliberately --
+            # confirmed tonight that the process was dying silently partway
+            # through a run and restarting from scratch, which Exception-only
+            # handling can miss (e.g. certain asyncio/websockets internals
+            # raise things that don't subclass Exception cleanly). One bad
+            # symbol must NEVER be able to take down the other 44.
+            print(f"  !! Error processing {symbol}: {type(e).__name__}: {e}")
+            import traceback as _tb
+            _tb.print_exc()
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +445,10 @@ async def run_monitor_pass():
                             db_mark_breakeven_applied(t["contract_id"])
                             print(f"  >> Breakeven applied to {t['contract_id']}")
 
-        except Exception as e:
-            print(f"  !! Error monitoring contract {t['contract_id']}: {e}")
+        except BaseException as e:
+            print(f"  !! Error monitoring contract {t['contract_id']}: {type(e).__name__}: {e}")
+            import traceback as _tb
+            _tb.print_exc()
 
 
 # ---------------------------------------------------------------------------
