@@ -75,17 +75,19 @@ def ensure_git_repo():
         subprocess.run(["git", "config", "user.email", "bot@users.noreply.github.com"], check=True, capture_output=True)
         subprocess.run(["git", "remote", "add", "origin", remote_url], check=True, capture_output=True)
 
-        # Fetch the real branch so we start from the actual repo history
-        # (not a disconnected fresh history), then reset our working files
-        # on top of it -- this keeps everything already on GitHub intact.
-        fetch = subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True)
-        if fetch.returncode == 0:
-            subprocess.run(["git", "branch", "-M", "main"], check=True, capture_output=True)
-            subprocess.run(["git", "reset", "origin/main"], check=True, capture_output=True)  # adopt remote history, keep local files as-is (working tree untouched)
+        subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True)
+        subprocess.run(["git", "branch", "-M", "main"], check=True, capture_output=True)
+        reset = subprocess.run(["git", "reset", "origin/main"], capture_output=True, text=True)
+        if reset.returncode == 0:
             print("  [git-init] Adopted existing GitHub history successfully.")
         else:
-            print(f"  !! [git-init] fetch failed, starting fresh history instead: {fetch.stderr}")
-            subprocess.run(["git", "branch", "-M", "main"], check=True, capture_output=True)
+            print(f"  !! [git-init] fetch/reset had an issue, continuing anyway: {reset.stderr}")
+
+        # Defensive cleanup: if candle_cache/ was ever accidentally committed in
+        # a previous (failed) run, untrack it now so it can't bloat future
+        # commits or get swept up by any future broad `git add`.
+        subprocess.run(["git", "rm", "-r", "--cached", "--ignore-unmatch", "candle_cache/"],
+                        capture_output=True)
 
         return True
     except subprocess.CalledProcessError as e:
@@ -114,7 +116,15 @@ def push_results_to_github():
         return
 
     try:
-        add_result = subprocess.run(["git", "add", "trades.db", "trade_log.csv", "candle_cache/"],
+        # Deliberately NOT pushing candle_cache/ -- confirmed via a real failure
+        # tonight that committing all 179 history CSV files in one shot causes
+        # `git pack-objects` to be OOM-killed (signal 9) on Railway's container,
+        # which aborts the whole push including trade_log.csv/trades.db that
+        # DO need to be saved. candle_cache/ is fully regenerable working data
+        # (rebuilt automatically by update_history() every run) -- it never
+        # needed to be in git at all. Only push the two files that are actual
+        # irreplaceable results.
+        add_result = subprocess.run(["git", "add", "trades.db", "trade_log.csv"],
                                      capture_output=True, text=True)
         print(f"  [git-push] git add returncode={add_result.returncode} "
               f"stdout={add_result.stdout!r} stderr={add_result.stderr!r}")
