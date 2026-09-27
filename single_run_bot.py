@@ -262,6 +262,8 @@ async def ensure_full_history(ws, symbol, granularity):
 
 async def update_history(ws, symbol, granularity):
     df = await ensure_full_history(ws, symbol, granularity)
+    old_max = df["timestamp"].max()
+
     recent = await fetch_candle_chunk(ws, symbol, granularity, 50, "latest")
     recent_df = pd.DataFrame(recent)
     recent_df["timestamp"] = pd.to_datetime(recent_df["epoch"], unit="s")
@@ -269,6 +271,21 @@ async def update_history(ws, symbol, granularity):
     combined = pd.concat([df, recent_df], ignore_index=True)
     combined = combined.drop_duplicates(subset="timestamp", keep="last").sort_values("timestamp").reset_index(drop=True)
     combined.to_csv(cache_path(symbol, granularity), index=False)
+
+    new_max = combined["timestamp"].max()
+    now_utc = pd.Timestamp.now("UTC").tz_localize(None)
+    lag_minutes = (now_utc - new_max).total_seconds() / 60
+    # DIAGNOSTIC: this is the missing visibility that let a 7-day-frozen-data
+    # bug go unnoticed -- we were never printing what timestamp the "latest"
+    # fetch actually returned, only whether the code RAN without error.
+    # A large lag here (much more than ~1 candle-period) means Deriv's
+    # "latest" isn't returning genuinely current data for this granularity/
+    # symbol, OR something is silently preventing new candles from being
+    # appended -- either way, this line makes that immediately visible
+    # instead of invisible.
+    print(f"    [freshness] {symbol}@{granularity}s: newest cached candle is "
+          f"{new_max} ({lag_minutes:.1f} min behind real time). "
+          f"(was {old_max} before this fetch)")
     return combined
 
 
